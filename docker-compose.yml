@@ -1,0 +1,153 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: football-postgres
+    environment:
+      POSTGRES_USER: football_user
+      POSTGRES_PASSWORD: football_password
+      POSTGRES_DB: football_predictor
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U football_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - football_network
+
+  # MongoDB Database
+  mongodb:
+    image: mongo:7
+    container_name: football-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: football_user
+      MONGO_INITDB_ROOT_PASSWORD: football_password
+      MONGO_INITDB_DATABASE: football_predictor
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - football_network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: football-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - football_network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: football-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DEBUG: "True"
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://football_user:football_password@postgres:5432/football_predictor
+      MONGODB_URL: mongodb://football_user:football_password@mongodb:27017/football_predictor
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5000,http://localhost:8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - football_network
+
+  # Flask Dashboard
+  dashboard:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.flask
+    container_name: football-dashboard
+    depends_on:
+      - backend
+    environment:
+      FLASK_APP: flask_dashboard.py
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://football_user:football_password@postgres:5432/football_predictor
+      API_URL: http://backend:8000
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app
+    command: flask run --host 0.0.0.0
+    networks:
+      - football_network
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: football-frontend
+    depends_on:
+      - backend
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      REACT_APP_DASHBOARD_URL: http://localhost:5000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+    command: npm start
+    networks:
+      - football_network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: football-nginx
+    depends_on:
+      - backend
+      - dashboard
+      - frontend
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - football_network
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+
+networks:
+  football_network:
+    driver: bridge
